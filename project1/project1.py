@@ -2,11 +2,9 @@ import sys
 
 import networkx as nx
 import pandas as pd
+import math
 
 from scipy.special import gammaln
-from collections import defaultdict
-from collections import Counter
-import math
 
 def write_gph(dag, idx2names, filename):
     with open(filename, 'w') as f:
@@ -16,14 +14,13 @@ def write_gph(dag, idx2names, filename):
 def read_csv(path):
     df = pd.read_csv(path)
     names = list(df.columns)
-    for c in names:  # HERE
+    for c in names:
         df[c] = df[c].astype(int)
     max_val = {c: int(df[c].max()) for c in names}
     return df, names, max_val
 
-
-# Local Bayesian score (Dirichlet-multinomial with αijk=1)
-def local_bd_score(df, child, parents, r):
+# Local Bayesian score
+def score(df, child, parents, r):
     ri = r[child]
     if not parents:
         counts = df[child].value_counts().reindex(range(1, ri+1), fill_value=0).values
@@ -37,39 +34,92 @@ def local_bd_score(df, child, parents, r):
         total += float(gammaln(ri) - gammaln(ri + nij) + (gammaln(1.0 + counts)).sum())
     return total
 
+# def k2(df, names, r):
+#     # create DiGraph
+#     dag = nx.DiGraph()
+#     dag.add_nodes_from(range(len(names)))
+
+#     name_index_map = {nm: i for i, nm in enumerate(names)}
+#     parents = {nm: [] for nm in names}
+
+#     for pos, child in enumerate(names):
+#         cand = names[:pos]
+#         current = []
+#         best = score(df, child, current, r)
+#         improved = True
+#         while improved and len(current) < 10:
+#             improved = False
+#             best_delta = 0.0
+#             best_p = None
+#             for p in cand:
+#                 if p in current:
+#                     continue
+#                 trial = sorted(current + [p])
+#                 s = score(df, child, trial, r)
+#                 if s - best > best_delta:
+#                     best_delta = s - best
+#                     best_p = p
+#             if best_p is not None and best_delta > 0.0:
+#                 current.append(best_p)
+#                 best += best_delta
+#                 improved = True
+#         parents[child] = list(current)
+#         for p in current:
+#             dag.add_edge(name_index_map[p], name_index_map[child])
+#     return dag, parents
+
+
 def k2(df, names, r):
-    name2idx = {nm: i for i, nm in enumerate(names)}
-    dag = nx.DiGraph()
-    dag.add_nodes_from(range(len(names)))
+    """
+    K2 structure learning algorithm (Julia-style).
+    Greedy edge addition: add best single parent at a time if it improves total score.
+    """
+    G = nx.DiGraph()
+    G.add_nodes_from(range(len(names)))
+
     parents = {nm: [] for nm in names}
-    for pos, child in enumerate(names):
-        cand = names[:pos]  # ensures acyclicity
-        current = []
-        best = local_bd_score(df, child, current, r)
-        improved = True
-        while improved and len(current) < 10:
-            improved = False
-            best_delta = 0.0
-            best_p = None
-            for p in cand:
-                if p in current:
+    name_to_index_map = {nm: i for i, nm in enumerate(names)}
+
+    y = total_score(df, names, r, parents)
+
+    for k in range(1, len(names)):
+        i_name = names[k]
+        y_cur = y
+
+        while True:
+            y_best = -math.inf
+            j_best = None
+
+            # try each prev node
+            for j_name in names[:k]:
+                if j_name in parents[i_name]:
                     continue
-                trial = sorted(current + [p])
-                s = local_bd_score(df, child, trial, r)
-                if s - best > best_delta:
-                    best_delta = s - best
-                    best_p = p
-            if best_p is not None and best_delta > 0.0:
-                current.append(best_p)
-                best += best_delta
-                improved = True
-        parents[child] = list(current)
-        for p in current:
-            dag.add_edge(name2idx[p], name2idx[child])
-    return dag, parents
+
+                G.add_edge(name_to_index_map[j_name], name_to_index_map[i_name])
+                parents[i_name].append(j_name)
+
+                y_new = total_score(df, names, r, parents)
+
+                if y_new > y_best:
+                    y_best = y_new
+                    j_best = j_name
+
+                parents[i_name].remove(j_name)
+                G.remove_edge(name_to_index_map[j_name], name_to_index_map[i_name])
+
+            if y_best > y_cur:
+                y_cur = y_best
+                y = y_best
+                G.add_edge(name_to_index_map[j_best], name_to_index_map[i_name])
+                parents[i_name].append(j_best)
+            else:
+                break
+
+    return G, parents
+
 
 def total_score(df, names, r, parents):
-    return sum(local_bd_score(df, nm, parents[nm], r) for nm in names)
+    return sum(score(df, nm, parents[nm], r) for nm in names)
     
 
 def compute(infile, outfile):
@@ -79,17 +129,12 @@ def compute(infile, outfile):
     s = total_score(df, names, r, parents)
     print(f"Score: {s:.6f}")
 
+
 def main():
-    # if len(sys.argv) != 3:
-    #     raise Exception("usage: python project1.py <infile>.csv <outfile>.gph")
-
-    # inputfilename = sys.argv[1]
-    # outputfilename = sys.argv[2]
-    # compute(inputfilename, outputfilename)
-
     compute("data/large.csv", "large.gph")
     compute("data/medium.csv", "medium.gph")
     compute("data/small.csv", "small.gph")
+
 
 if __name__ == '__main__':
     main()
